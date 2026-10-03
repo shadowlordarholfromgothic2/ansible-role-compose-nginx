@@ -1,29 +1,255 @@
 ---
 # ==============================================================================
-# template_role - role interface
+# compose_nginx - role interface
 # ==============================================================================
-# Everything a user of the role may override lives here, with a comment.
-# Internal constants that must not be overridden go to vars/main.yml.
+# Runs nginx as a Docker Compose stack in front of the other compose stacks on
+# the same host. nginx and the backends share a docker network, so a backend
+# is addressed by its container name and does not have to publish any port:
 #
-# Every variable starts with the role name (ansible-lint enforces this).
+#   client --:443--> nginx (/opt/nginx) --docker net "proxy"--> nexus:8081
+#                                                           \-> gitlab:80 ...
+#
+# Per site, four things matter: the backend, the domain name(s), the
+# certificate and the docker network the backend shares with nginx. The config
+# in /etc/nginx is rendered from the role's templates; your own snippets plug
+# into it at http, server and location level.
+#
+# The list variables nginx_sites, nginx_certificates and nginx_snippets are
+# MERGED with every variable named nginx_sites_<x>, nginx_certificates_<x> and
+# nginx_snippets_<x>. That lets each service's group_vars bring its own sites
+# without overwriting another service's on a shared host:
+#
+#   group_vars/nexus/nginx.yml   -> nginx_sites_nexus: [...]
+#   group_vars/gitlab/nginx.yml  -> nginx_sites_gitlab: [...]
+#
+# Do not name any other variable with those prefixes.
 # ==============================================================================
 
-# ---------- state -------------------------------------------------------------
+# ---------- identity ----------------------------------------------------------
 
-# present -> the role's config is installed
-# absent  -> the role's config is removed
-template_role_state: present
+# present   -> container created and running
+# stopped   -> container exists but is stopped
+# absent    -> container and compose dir removed. The config dir (with the
+#              certificates) and the docker network are KEPT - other stacks
+#              may still be attached to the network.
+nginx_state: present
+
+# Compose project name, also used as the container name.
+nginx_compose_project: nginx
+
+# ---------- image -------------------------------------------------------------
+
+nginx_image: nginx
+# Pin it: with nginx_pull: missing a moving tag is only pulled once.
+# nginx_upstream_resolve needs nginx >= 1.27.3. The -alpine variant ships curl,
+# which the container healthcheck uses.
+nginx_version: "1.30.5-alpine"
+
+# always | missing | never | policy
+nginx_pull: missing
 
 # ---------- paths -------------------------------------------------------------
 
-# Where the role writes its configuration on the managed host.
-template_role_config_dir: /etc/template_role
+# Project directory: docker-compose.yml only. Safe to delete and recreate.
+nginx_compose_dir: /opt/nginx
 
-# ---------- configuration -----------------------------------------------------
-
-# Key/value pairs rendered into {{ template_role_config_dir }}/config.ini.
+# Mounted read-only as /etc/nginx in the container - what is on the host is
+# exactly what nginx reads. The whole directory is mounted rather than single
+# files because a single-file bind mount keeps pointing at the old inode once
+# Ansible replaces the file, so a reload would not see the change.
 #
-# template_role_settings:
-#   log_level: info
-#   listen: "127.0.0.1:8080"
-template_role_settings: {}
+#   nginx.conf, mime.types
+#   conf.d/      _upstreams.conf, _default.conf and one <site>.conf per site
+#   snippets/    nginx_snippets
+#   certs/       <certificate>.crt / <certificate>.key
+nginx_config_dir: /etc/nginx
+
+# Compose template. Relative names are looked up in the role's templates/
+# first; to use your own, give an absolute path on the controller.
+nginx_compose_template: docker-compose.yml.j2
+
+# ---------- docker network ----------------------------------------------------
+
+# Network shared with the backends. Created by the role if it does not exist,
+# so run this role BEFORE the stacks that join it. A backend joins it as an
+# external network and is then reachable as <container_name>:<port>:
+#
+#   services:
+#     nexus:
+#       container_name: nexus
+#       networks: [proxy]
+#   networks:
+#     proxy:
+#       name: proxy
+#       external: true
+nginx_docker_network: proxy
+
+# More networks for nginx to join (created if missing), e.g. to reach a stack
+# that keeps its own network.
+nginx_docker_networks_extra: []
+
+# ---------- ports -------------------------------------------------------------
+
+# Host address the ports are published on; "" = all addresses (IPv4 and IPv6).
+nginx_bind_address: ""
+nginx_http_port: 80
+nginx_https_port: 443
+
+# ---------- container ---------------------------------------------------------
+
+# Extra bind mounts, compose short syntax, e.g. certificates managed elsewhere:
+#   - "/etc/letsencrypt:/etc/letsencrypt:ro"
+nginx_extra_volumes: []
+
+# Lets nginx reach services that run on the host itself (outside docker) as
+# host.docker.internal.
+nginx_extra_hosts:
+  - "host.docker.internal:host-gateway"
+
+# Minimum docker compose plugin version. docker_compose_v2 requires >= 2.18.0.
+nginx_min_compose_version: "2.18.0"
+
+# ---------- nginx.conf --------------------------------------------------------
+
+nginx_worker_processes: auto
+nginx_worker_connections: 1024
+# debug | info | notice | warn | error | crit | alert | emerg
+nginx_error_log_level: notice
+nginx_keepalive_timeout: 65s
+nginx_server_tokens: false
+
+# Docker's embedded DNS. Backends are looked up by name at runtime (see
+# nginx_upstream_resolve), so nginx starts before its backends exist and
+# follows them when a container is recreated with a new IP.
+nginx_resolver: "127.0.0.11 valid=10s ipv6=off"
+
+# Adds `resolve` to every upstream server. Without it nginx resolves backend
+# names once at start-up and refuses to start while a backend is missing.
+nginx_upstream_resolve: true
+# Idle keepalive connections per upstream, per worker.
+nginx_upstream_keepalive: 16
+
+# TLS defaults for every HTTPS site (Mozilla "intermediate").
+nginx_ssl_protocols: "TLSv1.2 TLSv1.3"
+nginx_ssl_ciphers: >-
+  ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305
+
+# Snippets (names from nginx_snippets) included in the http {} block.
+nginx_http_snippets: []
+
+# ---------- default server ----------------------------------------------------
+
+# Requests for a host name no site claims. 444 closes the connection without a
+# response; HTTPS handshakes for unknown names are rejected outright.
+nginx_default_status: 444
+
+# Answered with 200 on the default server - used by the container healthcheck
+# and the readiness probe below.
+nginx_health_path: /healthz
+
+# ---------- sites -------------------------------------------------------------
+
+# One entry per virtual host -> conf.d/<name>.conf
+#
+# nginx_sites:
+#   - name: nexus                     # REQUIRED, ^[a-z0-9][a-z0-9_.-]*$
+#     server_name: nexus.lab.local    # REQUIRED, domain name or list of them
+#     backend: http://nexus:8081      # REQUIRED unless `template` is given:
+#                                     #   scheme://container_name:port[/path]
+#     certificate: lab                # name from nginx_certificates -> HTTPS.
+#                                     #   Omit for a plain HTTP site.
+#
+#     # any key of nginx_site_defaults (below) can be overridden per site
+#     client_max_body_size: 0
+#     proxy_request_buffering: false
+#
+#     snippets: [allow-lan]           # included in server {}
+#     config: |                       # raw lines for server {}
+#       access_log off;
+#     proxy_headers:                  # extra proxy_set_header for its proxies
+#       X-Custom: value
+#
+#     locations:                      # more locations; a "/" entry replaces
+#       - path: /v2/                  #   the generated one
+#         backend: http://nexus:8082  # optional, same format as above
+#         snippets: []                # optional
+#         config: ""                  # optional raw lines
+#         proxy_headers: {}           # optional, merged over the site's
+#
+#     template: /abs/path/site.conf.j2  # optional: render this instead of the
+#                                       #   role's site template; it sees the
+#                                       #   site as `site`
+nginx_sites: []
+
+# Applied to every site, under the site's own keys. Overriding this variable
+# replaces the whole dict, so copy all keys if you change it.
+nginx_site_defaults:
+  # With a certificate: port 80 only redirects to HTTPS. false = serve the
+  # site on both ports.
+  https_redirect: true
+  http2: true
+  # Only switch on once HTTPS works for good - browsers remember it.
+  hsts: false
+  # 0 = unlimited
+  client_max_body_size: 100m
+  # true = nginx buffers responses / request bodies (to disk if needed) and
+  # frees the backend early. Turn off for big streamed transfers.
+  proxy_buffering: true
+  proxy_request_buffering: true
+  proxy_connect_timeout: 10s
+  proxy_read_timeout: 60s
+  proxy_send_timeout: 60s
+  proxy_headers: {}
+  snippets: []
+  locations: []
+  config: ""
+
+# ---------- certificates ------------------------------------------------------
+
+# One entry per certificate -> certs/<name>.crt + certs/<name>.key. A site uses
+# one by name; several sites may share one (e.g. a wildcard).
+#
+# nginx_certificates:
+#   # PEM content - certificate followed by its intermediates, and the key.
+#   # lookup('file') decrypts vault-encrypted files transparently.
+#   - name: lab
+#     cert: "{{ lookup('ansible.builtin.file', 'files/certs/lab.crt') }}"
+#     key: "{{ vault_lab_tls_key }}"
+#
+#   # Self-signed, generated on the host and regenerated when the names
+#   # change. `domains` defaults to the server names of the sites using it.
+#   - name: nexus
+#     self_signed: true
+#     domains: [nexus.lab.local]      # optional
+#
+#   # Neither: the files are put in certs/ by something else (certbot hook,
+#   # ...). The role only checks that they exist.
+#   - name: external
+nginx_certificates: []
+
+nginx_selfsigned_days: 3650
+
+# ---------- snippets ----------------------------------------------------------
+
+# Your own config pieces -> snippets/<name>.conf. They are not loaded on their
+# own: include them by name via nginx_http_snippets, a site's `snippets` or a
+# location's `snippets`.
+#
+# nginx_snippets:
+#   - name: allow-lan
+#     content: |
+#       allow 192.168.0.0/16;
+#       deny all;
+#   - name: security-headers
+#     src: "{{ playbook_dir }}/files/nginx/security-headers.conf.j2"  # template
+nginx_snippets: []
+
+# Delete *.conf files in conf.d/ and snippets/ that no longer belong to a
+# site or snippet - removing an entry from the variables removes it from nginx.
+nginx_purge_unmanaged: true
+
+# ---------- readiness ---------------------------------------------------------
+
+# After a deploy, poll nginx_health_path until nginx answers.
+nginx_wait_timeout: 60
+nginx_wait_delay: 3

@@ -1,0 +1,171 @@
+---
+# ==============================================================================
+# Directories - must exist before any file lands
+# ==============================================================================
+
+- name: Create the compose project directory
+  ansible.builtin.file:
+    path: "{{ nginx_compose_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  tags: [config]
+
+- name: Create the nginx config directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ nginx_config_dir }}", mode: "0755" }
+    - { path: "{{ nginx_config_dir }}/conf.d", mode: "0755" }
+    - { path: "{{ nginx_config_dir }}/snippets", mode: "0755" }
+    # Only the nginx master reads the keys, and it runs as root.
+    - { path: "{{ _nginx_certs_dir }}", mode: "0700" }
+  loop_control:
+    label: "{{ item.path }}"
+  register: _nginx_config_dirs
+  tags: [config]
+
+# ==============================================================================
+# Config files
+#
+# Every file notifies `reload nginx`: /etc/nginx is a bind mount, so
+# `docker compose up` cannot see a change in it. Order matters only for
+# readability - nothing is loaded before the config test below.
+# ==============================================================================
+
+- name: Install the certificates
+  ansible.builtin.import_tasks: certificates.yml
+
+- name: Install mime.types
+  ansible.builtin.copy:
+    src: mime.types
+    dest: "{{ nginx_config_dir }}/mime.types"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload nginx
+  tags: [config]
+
+- name: Render the snippets
+  ansible.builtin.template:
+    src: "{{ snippet.src | default('snippet.conf.j2') }}"
+    dest: "{{ nginx_config_dir }}/snippets/{{ snippet.name }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _nginx_snippets }}"
+  loop_control:
+    loop_var: snippet
+    label: "{{ snippet.name }}"
+  notify: reload nginx
+  tags: [config]
+
+- name: Render nginx.conf
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ nginx_config_dir }}/nginx.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload nginx
+  tags: [config]
+
+# The leading underscore keeps them apart from the sites: site names must
+# start with a letter or digit.
+- name: Render the upstreams and the default server
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ nginx_config_dir }}/conf.d/_{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - upstreams.conf
+    - default.conf
+  notify: reload nginx
+  tags: [config]
+
+- name: Render the sites
+  ansible.builtin.template:
+    src: "{{ site.template | default('site.conf.j2') }}"
+    dest: "{{ nginx_config_dir }}/conf.d/{{ site.name }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _nginx_sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }} ({{ site.server_names | join(', ') }})"
+  notify: reload nginx
+  tags: [config]
+
+- name: Find config files that no site or snippet owns
+  ansible.builtin.find:
+    paths:
+      - "{{ nginx_config_dir }}/conf.d"
+      - "{{ nginx_config_dir }}/snippets"
+    patterns: "*.conf"
+  register: _nginx_conf_files
+  when:
+    - nginx_purge_unmanaged | bool
+    # a dry run on a fresh host: the directories do not exist yet
+    - not (ansible_check_mode and _nginx_config_dirs is changed)
+  tags: [config]
+
+- name: Remove config files that no site or snippet owns
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ _nginx_conf_files.files | default([]) | map(attribute='path') | difference(_nginx_managed_files) }}"
+  when: nginx_purge_unmanaged | bool
+  notify: reload nginx
+  tags: [config]
+
+# ==============================================================================
+# Compose file
+# ==============================================================================
+
+- name: Render docker-compose.yml
+  ansible.builtin.template:
+    src: "{{ nginx_compose_template }}"
+    dest: "{{ nginx_compose_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+    # Deliberately NO notify: docker_compose_v2 diffs the compose config and
+    # recreates the container itself when it changed.
+    validate: >-
+      docker compose --project-directory {{ nginx_compose_dir | quote }}
+      --project-name {{ nginx_compose_project | quote }} -f %s config -q
+  tags: [config]
+
+# ==============================================================================
+# Config test - in a one-off container from the same compose service (same
+# image, mounts and networks), so it also works before nginx ever ran. A
+# failure stops the play before the reload, and the running nginx keeps
+# serving its previous config.
+# ==============================================================================
+
+- name: Test the nginx configuration
+  ansible.builtin.command:
+    argv: "{{ _nginx_compose_cmd + ['run', '--rm', '--no-deps', '-T', 'nginx', 'nginx', '-t'] }}"
+  register: _nginx_configtest
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode    # the files above were not written
+  tags: [config]
+
+- name: Fail if nginx rejects the configuration
+  ansible.builtin.fail:
+    msg: >-
+      {{ ['compose_nginx: nginx -t failed - nothing was reloaded.']
+         + (_nginx_configtest.stderr_lines | reject('match', '^\s*Container ') | list) }}
+  when:
+    - not ansible_check_mode
+    - _nginx_configtest.rc != 0
+  tags: [config]

@@ -1,0 +1,93 @@
+# {{ ansible_managed }}
+# Site '{{ site.name }}' - rendered by the compose_nginx role, do not edit on the host.
+{#
+  proxy(backend, headers): the body of a proxying location. Headers are set
+  per location on purpose - a location that sets any proxy_set_header of its
+  own would otherwise silently drop all the inherited ones.
+#}
+{% macro proxy(backend, headers) %}
+{% set b = _nginx_backends[backend] %}
+proxy_pass {{ b.scheme }}://{{ b.upstream }}{{ b.path }};
+proxy_http_version 1.1;
+proxy_set_header Host              $http_host;
+proxy_set_header X-Real-IP         $remote_addr;
+proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host  $http_host;
+proxy_set_header Upgrade           $http_upgrade;
+proxy_set_header Connection        $proxy_connection;
+{% for name, value in headers | dictsort %}
+proxy_set_header {{ name }} "{{ value }}";
+{% endfor %}
+{% if b.scheme == 'https' %}
+proxy_ssl_server_name on;
+proxy_ssl_name {{ b.host }};
+{% endif %}
+{% endmacro %}
+{% set tls = site.certificate | length > 0 %}
+{% set redirect = tls and site.https_redirect | bool %}
+{% if redirect %}
+
+server {
+    listen 80;
+    server_name {{ site.server_names | join(' ') }};
+
+    return 301 https://$host{{ _nginx_https_port_suffix }}$request_uri;
+}
+{% endif %}
+
+server {
+{% if not redirect %}
+    listen 80;
+{% endif %}
+{% if tls %}
+    listen 443 ssl;
+    http2 {{ 'on' if site.http2 | bool else 'off' }};
+{% endif %}
+    server_name {{ site.server_names | join(' ') }};
+{% if tls %}
+
+    ssl_certificate     /etc/nginx/certs/{{ site.certificate }}.crt;
+    ssl_certificate_key /etc/nginx/certs/{{ site.certificate }}.key;
+{% if site.hsts | bool %}
+    add_header Strict-Transport-Security "max-age=31536000" always;
+{% endif %}
+{% endif %}
+
+    client_max_body_size    {{ site.client_max_body_size }};
+    proxy_buffering         {{ 'on' if site.proxy_buffering | bool else 'off' }};
+    proxy_request_buffering {{ 'on' if site.proxy_request_buffering | bool else 'off' }};
+    proxy_connect_timeout   {{ site.proxy_connect_timeout }};
+    proxy_read_timeout      {{ site.proxy_read_timeout }};
+    proxy_send_timeout      {{ site.proxy_send_timeout }};
+{% if site.snippets | length > 0 %}
+
+{% for name in site.snippets %}
+    include /etc/nginx/snippets/{{ name }}.conf;
+{% endfor %}
+{% endif %}
+{% if site.config | trim | length > 0 %}
+
+    {{ site.config | trim | indent(4) }}
+{% endif %}
+{% if '/' not in site.locations | map(attribute='path') | list %}
+
+    location / {
+        {{ proxy(site.backend, site.proxy_headers) | trim | indent(8) }}
+    }
+{% endif %}
+{% for loc in site.locations %}
+
+    location {{ loc.path }} {
+{% if loc.backend is defined %}
+        {{ proxy(loc.backend, site.proxy_headers | combine(loc.proxy_headers | default({}))) | trim | indent(8) }}
+{% endif %}
+{% for name in loc.snippets | default([]) %}
+        include /etc/nginx/snippets/{{ name }}.conf;
+{% endfor %}
+{% if loc.config | default('') | trim | length > 0 %}
+        {{ loc.config | trim | indent(8) }}
+{% endif %}
+    }
+{% endfor %}
+}

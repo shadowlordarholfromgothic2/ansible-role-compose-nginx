@@ -1,0 +1,27 @@
+# {{ ansible_managed }}
+# Catch-all for host names that no site claims - rendered by the compose_nginx
+# role. Also answers the health checks, which reach nginx by IP.
+
+server {
+    listen 80 default_server;
+    server_name _;
+
+    location = {{ nginx_health_path }} {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location / {
+        return {{ nginx_default_status }};
+    }
+}
+
+server {
+    listen 443 ssl default_server;
+    server_name _;
+
+    # Refuses the TLS handshake for unknown names, so no certificate is needed
+    # here and none leaks to clients that ask for the wrong host.
+    ssl_reject_handshake on;
+}

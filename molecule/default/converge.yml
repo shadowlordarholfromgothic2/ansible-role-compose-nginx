@@ -4,13 +4,55 @@
   become: true
 
   vars:
-    template_role_settings:
-      log_level: info
-      listen: "127.0.0.1:8080"
+    nginx_certificates:
+      - name: test
+        self_signed: true             # SANs from the sites: app.test, www.app.test
 
+    nginx_snippets:
+      - name: hello
+        content: 'add_header X-Snippet "hello" always;'
+
+    nginx_sites:
+      - name: app
+        server_name: [app.test, www.app.test]
+        backend: http://whoami:80
+        certificate: test
+        snippets: [hello]
+        proxy_headers:
+          X-Test: from-site
+        locations:
+          - path: /static/
+            config: 'return 200 "static\n";'
+
+    # Merged with nginx_sites, as a second service's group_vars would be.
+    nginx_sites_other:
+      - name: plain
+        server_name: plain.test
+        backend: http://whoami:80
+
+  # Docker is installed by prepare.yml. The `check` step runs this playbook in
+  # check mode as well.
   tasks:
     # Fully qualified (namespace from meta/main.yml): Molecule and ansible-lint
     # link the repo under this name, whatever the checkout directory is called.
     - name: Run the role under test
       ansible.builtin.import_role:
-        name: local.template_role
+        name: local.compose_nginx
+
+    # Started after nginx on purpose: nginx has to come up while its backend
+    # does not exist yet, and pick it up once it does. Skipped in check mode,
+    # where the role has not created the network it joins.
+    - name: Start a backend on the shared network
+      community.docker.docker_compose_v2:
+        project_name: whoami
+        definition:
+          services:
+            whoami:
+              image: traefik/whoami:v1.12
+              container_name: whoami
+              networks: [proxy]
+          networks:
+            proxy:
+              name: proxy
+              external: true
+      when: not ansible_check_mode

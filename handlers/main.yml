@@ -1,13 +1,19 @@
 ---
-# Handlers are notified by their `listen` topic, not by their name, so the name
-# can change without breaking the tasks that notify it.
+# Every rendered config file notifies this. A reload makes nginx re-read its
+# config without dropping connections; `docker compose up` would not notice
+# the change at all, because /etc/nginx is a bind mount, not compose config.
 #
-# TODO: replace the placeholder with the real action, e.g.
-#   ansible.builtin.systemd_service:
-#     name: myservice
-#     state: restarted
+# The config test in tasks/config.yml has already passed when this runs.
+# Retried because right after `docker compose up` created the container,
+# nginx may still be starting and not have written its pid file yet.
 
-- name: Apply template_role configuration
-  ansible.builtin.debug:
-    msg: "template_role: configuration changed - TODO: reload the service"
-  listen: template_role config changed
+- name: Reload nginx
+  ansible.builtin.command:
+    argv: "{{ _nginx_compose_cmd + ['exec', '-T', 'nginx', 'nginx', '-s', 'reload'] }}"
+  register: _nginx_reload
+  until: _nginx_reload.rc == 0
+  retries: 5
+  delay: 2
+  changed_when: true
+  when: nginx_state == 'present'
+  listen: reload nginx

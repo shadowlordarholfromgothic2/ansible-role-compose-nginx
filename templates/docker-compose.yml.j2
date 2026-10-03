@@ -1,0 +1,67 @@
+# {{ ansible_managed }}
+# nginx reverse proxy - rendered by the compose_nginx role.
+#
+# Config:  {{ nginx_config_dir }} (mounted read-only as /etc/nginx)
+# Test:    docker compose -f {{ nginx_compose_dir }}/docker-compose.yml exec nginx nginx -t
+# Reload:  docker compose -f {{ nginx_compose_dir }}/docker-compose.yml exec nginx nginx -s reload
+# Logs:    docker logs -f {{ nginx_compose_project }}
+{% set bind = '' if nginx_bind_address | length == 0
+   else (('[' ~ nginx_bind_address ~ ']') if ':' in nginx_bind_address else nginx_bind_address) ~ ':' %}
+
+services:
+  nginx:
+    image: "{{ nginx_image }}:{{ nginx_version }}"
+    container_name: {{ nginx_compose_project }}
+    restart: unless-stopped
+
+    ports:
+      - "{{ bind }}{{ nginx_http_port }}:80"
+      - "{{ bind }}{{ nginx_https_port }}:443"
+
+    volumes:
+      - "{{ nginx_config_dir }}:/etc/nginx:ro"
+{% for volume in nginx_extra_volumes %}
+      - "{{ volume }}"
+{% endfor %}
+{% if _nginx_networks | length > 0 %}
+
+    # Shared with the backend stacks, which join them as external networks.
+    networks:
+{% for network in _nginx_networks %}
+      - "{{ network }}"
+{% endfor %}
+{% endif %}
+{% if nginx_extra_hosts | length > 0 %}
+
+    extra_hosts:
+{% for host in nginx_extra_hosts %}
+      - "{{ host }}"
+{% endfor %}
+{% endif %}
+
+    environment:
+      NGINX_ENTRYPOINT_QUIET_LOGS: "1"
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1{{ nginx_health_path }}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+{% if _nginx_networks | length > 0 %}
+
+networks:
+{% for network in _nginx_networks %}
+  "{{ network }}":
+    # Created by the role (tasks/network.yml), not by compose, so that
+    # `docker compose down` here never tears it away from the backends.
+    name: "{{ network }}"
+    external: true
+{% endfor %}
+{% endif %}

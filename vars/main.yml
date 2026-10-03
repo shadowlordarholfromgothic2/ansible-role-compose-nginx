@@ -1,0 +1,138 @@
+---
+# Derived values - computed from defaults/main.yml, not meant to be overridden.
+
+# ---------- merged inputs -----------------------------------------------------
+# nginx_<x> plus every nginx_<x>_<suffix>, see the top of defaults/main.yml.
+
+_nginx_sites_raw: >-
+  {{ (nginx_sites + query('ansible.builtin.vars',
+      *(query('ansible.builtin.varnames', '^nginx_sites_.+$') | sort)))
+     | flatten(levels=1) }}
+
+_nginx_certificates_raw: >-
+  {{ (nginx_certificates + query('ansible.builtin.vars',
+      *(query('ansible.builtin.varnames', '^nginx_certificates_.+$') | sort)))
+     | flatten(levels=1) }}
+
+_nginx_snippets: >-
+  {{ (nginx_snippets + query('ansible.builtin.vars',
+      *(query('ansible.builtin.varnames', '^nginx_snippets_.+$') | sort)))
+     | flatten(levels=1) }}
+
+# ---------- input checks ------------------------------------------------------
+
+# Names of sites, certificates and snippets - they become file names.
+_nginx_name_re: '^[a-z0-9][a-z0-9_.-]*$'
+# scheme://host[:port][/path]; host may be a container name, DNS name or IP.
+_nginx_backend_re: '^https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_.-]+)(:[0-9]{1,5})?(/.*)?$'
+
+# ---------- sites -------------------------------------------------------------
+
+# Each site with nginx_site_defaults filled in, plus
+#   server_names: always a list
+#   certificate:  always a string, "" for plain HTTP
+_nginx_sites: >-
+  {%- set out = [] -%}
+  {%- for s in _nginx_sites_raw -%}
+  {%-   set site = nginx_site_defaults | combine(s) -%}
+  {%-   set names = site.server_name | default([]) -%}
+  {%-   set _ = out.append(site | combine({
+          'server_names': [names] if names is string else names,
+          'certificate': site.certificate | default('', true),
+        })) -%}
+  {%- endfor -%}
+  {{ out }}
+
+# ---------- backends ----------------------------------------------------------
+
+# Every distinct backend URL of every site and location.
+_nginx_backend_urls: >-
+  {{ ((_nginx_sites | map(attribute='backend', default='') | list)
+      + (_nginx_sites | map(attribute='locations') | flatten(levels=1)
+         | map(attribute='backend', default='') | list))
+     | select | unique }}
+
+# backend URL -> how to reach it. Backends on the same host:port share one
+# upstream block, which carries the keepalive pool and the runtime DNS lookup.
+#   http://nexus:8081 -> {scheme: http, host: nexus, port: 8081, path: "",
+#                         upstream: nexus_8081}
+_nginx_backends: >-
+  {%- set out = {} -%}
+  {%- for url in _nginx_backend_urls -%}
+  {%-   set u = url | urlsplit -%}
+  {%-   set port = u.port or (443 if u.scheme == 'https' else 80) -%}
+  {%-   set _ = out.update({url: {
+          'scheme': u.scheme,
+          'host': u.hostname,
+          'port': port,
+          'path': u.path,
+          'upstream': (u.hostname ~ '_' ~ port) | regex_replace('[^A-Za-z0-9_]', '_'),
+        }}) -%}
+  {%- endfor -%}
+  {{ out }}
+
+_nginx_upstreams: >-
+  {{ _nginx_backends.values() | list | unique(attribute='upstream') | sort(attribute='upstream') }}
+
+# ---------- certificates ------------------------------------------------------
+
+# Each certificate with
+#   self_signed: always a bool
+#   domains:     always a list; defaults to the server names of its sites
+_nginx_certificates: >-
+  {%- set out = [] -%}
+  {%- for c in _nginx_certificates_raw -%}
+  {%-   set used_by = _nginx_sites | selectattr('certificate', 'equalto', c.name | default(''))
+                      | map(attribute='server_names') | flatten | unique | list -%}
+  {%-   set domains = c.domains | default(used_by) -%}
+  {%-   set _ = out.append({'self_signed': false} | combine(c, {
+          'domains': [domains] if domains is string else domains,
+        })) -%}
+  {%- endfor -%}
+  {{ out }}
+
+# ---------- files -------------------------------------------------------------
+
+_nginx_certs_dir: "{{ nginx_config_dir }}/certs"
+
+# Certificates the role neither copies nor generates - their files must exist.
+_nginx_external_cert_files: >-
+  {{ _nginx_certificates | rejectattr('cert', 'defined') | rejectattr('self_signed')
+     | map(attribute='name') | product(['.crt', '.key']) | map('join')
+     | map('regex_replace', '^', _nginx_certs_dir ~ '/') | list }}
+
+# Self-signed certificates: an IP address among `domains` (matched at its
+# start, to prefix it with "IP:"), and the names `openssl x509 -ext` prints.
+_nginx_ip_re: '^(?=[0-9.]+$|[0-9A-Fa-f]*:)'
+_nginx_san_re: '(?:DNS|IP Address):([^,\s]+)'
+
+# Everything nginx_purge_unmanaged keeps.
+_nginx_managed_files: >-
+  {{ [nginx_config_dir ~ '/conf.d/_upstreams.conf', nginx_config_dir ~ '/conf.d/_default.conf']
+     + (_nginx_sites | map(attribute='name')
+        | map('regex_replace', '^', nginx_config_dir ~ '/conf.d/')
+        | map('regex_replace', '$', '.conf') | list)
+     + (_nginx_snippets | map(attribute='name')
+        | map('regex_replace', '^', nginx_config_dir ~ '/snippets/')
+        | map('regex_replace', '$', '.conf') | list) }}
+
+# ---------- runtime -----------------------------------------------------------
+
+_nginx_networks: "{{ ([nginx_docker_network] + nginx_docker_networks_extra) | select | unique }}"
+
+# Prefix for `docker compose` commands against this project.
+_nginx_compose_cmd:
+  - docker
+  - compose
+  - --project-directory
+  - "{{ nginx_compose_dir }}"
+  - --project-name
+  - "{{ nginx_compose_project }}"
+
+# Where the readiness probe reaches nginx from the host.
+_nginx_probe_host: >-
+  {{ '127.0.0.1' if nginx_bind_address in ['', '0.0.0.0', '::']
+     else ('[' ~ nginx_bind_address ~ ']' if ':' in nginx_bind_address else nginx_bind_address) }}
+
+# Appended to the host in HTTP -> HTTPS redirects when HTTPS is not on 443.
+_nginx_https_port_suffix: "{{ '' if nginx_https_port | int == 443 else ':' ~ nginx_https_port }}"

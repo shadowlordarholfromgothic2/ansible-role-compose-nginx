@@ -6,17 +6,94 @@
   become: true
   gather_facts: false
 
-  tasks:
-    - name: Read the rendered configuration file
-      ansible.builtin.slurp:
-        src: /etc/template_role/config.ini
-      register: config
+  vars:
+    # curl from inside the nginx container: it can pin a host name to
+    # 127.0.0.1 (--resolve), which the uri module cannot, and TLS needs SNI.
+    curl: >-
+      docker exec nginx curl -sk --max-time 5
+      --resolve app.test:443:127.0.0.1 --resolve app.test:80:127.0.0.1
+      --resolve plain.test:80:127.0.0.1 --resolve nobody.test:80:127.0.0.1
 
-    - name: Assert the settings were rendered
+  tasks:
+    - name: Stat the files with tight permissions
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /opt/nginx/docker-compose.yml
+        - /etc/nginx/certs
+        - /etc/nginx/certs/test.key
+      register: files
+
+    - name: Assert the permissions
       ansible.builtin.assert:
         that:
-          - "'log_level = info' in content"
-          - "'listen = 127.0.0.1:8080' in content"
+          - files.results[0].stat.mode == '0640'
+          - files.results[1].stat.mode == '0700'
+          - files.results[2].stat.mode == '0600'
         quiet: true
-      vars:
-        content: "{{ config.content | b64decode }}"
+
+    - name: The self-signed certificate covers the names of its sites
+      ansible.builtin.command: openssl x509 -noout -ext subjectAltName -in /etc/nginx/certs/test.crt
+      register: san
+      changed_when: false
+
+    - name: Assert the certificate names
+      ansible.builtin.assert:
+        that:
+          - "'DNS:app.test' in san.stdout"
+          - "'DNS:www.app.test' in san.stdout"
+        quiet: true
+
+    - name: The nginx configuration test passes
+      ansible.builtin.command: docker exec nginx nginx -t
+      changed_when: false
+
+    - name: The health endpoint answers on the published port
+      ansible.builtin.uri:
+        url: http://127.0.0.1/healthz
+        return_content: true
+      register: health
+      failed_when: health.content != "ok\n"
+
+    # The backend was started after nginx; give the runtime lookup time to
+    # retry (nginx caches the failed lookup for up to 30s).
+    - name: The HTTPS site reaches the backend
+      ansible.builtin.command: "{{ curl }} -i https://app.test/"
+      register: app
+      changed_when: false
+      until: app.stdout is search('HTTP/2 200')
+      retries: 20
+      delay: 3
+
+    - name: Assert the forwarded headers and the snippet
+      ansible.builtin.assert:
+        that:
+          - "app.stdout is search('(?i)x-snippet: hello')"
+          - "'Host: app.test' in app.stdout"
+          - "'X-Forwarded-Proto: https' in app.stdout"
+          - "'X-Test: from-site' in app.stdout"
+        quiet: true
+
+    - name: HTTP on a TLS site redirects to HTTPS
+      ansible.builtin.command: "{{ curl }} -o /dev/null -w '%{http_code} %{redirect_url}' http://app.test/x?y=1"
+      register: redirect
+      changed_when: false
+      failed_when: redirect.stdout != '301 https://app.test/x?y=1'
+
+    - name: Extra locations are rendered
+      ansible.builtin.command: "{{ curl }} https://app.test/static/"
+      register: static
+      changed_when: false
+      failed_when: static.stdout != 'static'
+
+    - name: A site from nginx_sites_* is served over plain HTTP
+      ansible.builtin.command: "{{ curl }} -o /dev/null -w '%{http_code}' http://plain.test/"
+      register: plain
+      changed_when: false
+      failed_when: plain.stdout != '200'
+
+    - name: Unknown host names get no answer
+      ansible.builtin.command: "{{ curl }} http://nobody.test/"
+      register: unknown
+      changed_when: false
+      failed_when: unknown.rc != 52     # curl: empty reply from server (444)

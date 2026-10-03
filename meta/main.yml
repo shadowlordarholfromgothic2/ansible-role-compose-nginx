@@ -1,13 +1,12 @@
 ---
 galaxy_info:
-  # Must match the prefix of every variable in defaults/main.yml
-  # (ansible-lint: var-naming[no-role-prefix]).
-  role_name: template_role
+  role_name: compose_nginx
   namespace: local
   author: Kirill
   description: >-
-    TODO: one or two sentences on what the role does and what it deliberately
-    leaves to other roles.
+    nginx as a Docker Compose stack, reverse-proxying the other compose
+    stacks on the same host over a shared docker network. Installing Docker
+    is left to other roles.
   license: MIT
   min_ansible_version: "2.14"
   platforms:
@@ -15,8 +14,15 @@ galaxy_info:
       versions: [bookworm, trixie]
     - name: Ubuntu
       versions: [jammy, noble]
-  galaxy_tags: []
+    - name: EL
+      versions: ["9"]
+  galaxy_tags:
+    - docker
+    - compose
+    - nginx
+    - reverseproxy
+    - tls
 
-# Prefer checking for a prerequisite in tasks/main.yml over pulling in a role
-# that installs it.
+# Docker is a hard requirement but installing it is not this role's job:
+# tasks/main.yml checks for the `docker compose` plugin instead.
 dependencies: []

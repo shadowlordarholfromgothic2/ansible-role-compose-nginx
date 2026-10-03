@@ -1,0 +1,511 @@
+---
+# The role's variables, for `ansible-doc -t role` and for the argument
+# validation Ansible runs before the role's first task. The defaults here are
+# documentation only - the role takes its values from defaults/main.yml, so keep
+# the two in sync.
+#
+# Validation templates every variable listed below before the role's first
+# task, so a value that refers to ansible_facts needs a play that gathers them.
+#
+# Not listed, so not validated here: the nginx_sites_<x>,
+# nginx_certificates_<x> and nginx_snippets_<x> lists merged into the three
+# main ones (their names are not known in advance). tasks/main.yml checks every
+# entry of the merged lists, whatever variable it came from.
+argument_specs:
+  main:
+    short_description: nginx as a Docker Compose reverse proxy for the other stacks on the host
+    description:
+      - Runs nginx as a Docker Compose stack in front of the other compose
+        stacks on the same host. nginx and the backends share a docker
+        network, so a backend is addressed by its container name and does not
+        have to publish any port.
+      - Renders C(nginx.conf), one C(server) per site, an C(upstream) per
+        backend and a catch-all default server into O(nginx_config_dir), and
+        installs provided, self-signed or externally managed certificates.
+      - Every config change is checked with C(nginx -t) and applied with a
+        graceful C(nginx -s reload).
+      - O(nginx_sites), O(nginx_certificates) and O(nginx_snippets) are merged
+        with every variable named C(nginx_sites_<x>), C(nginx_certificates_<x>)
+        and C(nginx_snippets_<x>), so each service's group_vars can bring its
+        own sites to a shared host. Do not give any other variable one of
+        these prefixes.
+      - Does not install Docker. The C(docker compose) plugin must already be
+        on the host, in version O(nginx_min_compose_version) or newer.
+    author:
+      - Kirill
+    options:
+      # ── State and identity ───────────────────────────────────────────────
+      nginx_state:
+        type: str
+        default: present
+        choices: [present, stopped, absent]
+        description:
+          - V(present) creates and starts the container, V(stopped) keeps it
+            but stops it.
+          - V(absent) runs C(docker compose down) and deletes
+            O(nginx_compose_dir). O(nginx_config_dir) (with the certificates)
+            and the docker networks are kept, because other stacks may still
+            be attached to them.
+      nginx_compose_project:
+        type: str
+        default: nginx
+        description:
+          - Compose project name, also used as the container name.
+          - Must match C(^[a-z0-9][a-z0-9_-]*$).
+
+      # ── Image ────────────────────────────────────────────────────────────
+      nginx_image:
+        type: str
+        default: nginx
+        description: Image to run, without the tag.
+      nginx_version:
+        type: str
+        default: 1.30.5-alpine
+        description:
+          - Image tag. Pin it, since with O(nginx_pull=missing) a moving tag is
+            pulled only once.
+          - O(nginx_upstream_resolve) needs nginx 1.27.3 or newer.
+          - The container healthcheck uses C(curl), which the C(-alpine)
+            variant ships.
+      nginx_pull:
+        type: str
+        default: missing
+        choices: [always, missing, never, policy]
+        description: When C(docker compose up) pulls the image.
+
+      # ── Paths ────────────────────────────────────────────────────────────
+      nginx_compose_dir:
+        type: path
+        default: /opt/nginx
+        description:
+          - Compose project directory. Holds only C(docker-compose.yml) and is
+            safe to delete and recreate.
+      nginx_config_dir:
+        type: path
+        default: /etc/nginx
+        description:
+          - nginx configuration on the host, mounted read-only as C(/etc/nginx)
+            in the container.
+          - Holds C(nginx.conf), C(mime.types), C(conf.d/), C(snippets/) and
+            C(certs/).
+          - The whole directory is mounted, not single files, so a reload sees
+            files that Ansible replaced.
+      nginx_compose_template:
+        type: str
+        default: docker-compose.yml.j2
+        description:
+          - Template for C(docker-compose.yml). A relative name is looked up in
+            the role's C(templates/) first.
+          - To use your own, give an absolute path on the controller.
+
+      # ── Docker networks ──────────────────────────────────────────────────
+      nginx_docker_network:
+        type: str
+        default: proxy
+        description:
+          - Docker network shared with the backends. The role creates it if it
+            does not exist, so run the role B(before) the stacks that join it.
+          - A backend joins it as an external network and is then reachable as
+            C(<container_name>:<port>).
+      nginx_docker_networks_extra:
+        type: list
+        elements: str
+        default: []
+        description:
+          - More networks for nginx to join, created if missing. For example to
+            reach a stack that keeps a network of its own.
+
+      # ── Ports ────────────────────────────────────────────────────────────
+      nginx_bind_address:
+        type: str
+        default: ""
+        description:
+          - Host address the ports are published on.
+          - An empty string publishes them on all addresses, IPv4 and IPv6.
+      nginx_http_port:
+        type: int
+        default: 80
+        description: Host port published for HTTP.
+      nginx_https_port:
+        type: int
+        default: 443
+        description:
+          - Host port published for HTTPS.
+          - HTTP-to-HTTPS redirects include it when it is not V(443).
+
+      # ── Container ────────────────────────────────────────────────────────
+      nginx_extra_volumes:
+        type: list
+        elements: str
+        default: []
+        description:
+          - Extra bind mounts, compose short syntax, for example
+            V(/etc/letsencrypt:/etc/letsencrypt:ro).
+      nginx_extra_hosts:
+        type: list
+        elements: str
+        default: ["host.docker.internal:host-gateway"]
+        description:
+          - Entries for the container's C(/etc/hosts), compose C(extra_hosts)
+            syntax.
+          - The default lets nginx reach services that run on the host itself,
+            outside docker, as C(host.docker.internal).
+      nginx_min_compose_version:
+        type: str
+        default: 2.18.0
+        description:
+          - Oldest C(docker compose) plugin version the role accepts. The role
+            fails early if the plugin is missing or older.
+          - C(community.docker.docker_compose_v2) needs 2.18.0 or newer.
+
+      # ── nginx.conf ───────────────────────────────────────────────────────
+      nginx_worker_processes:
+        type: raw
+        default: auto
+        description: C(worker_processes), a number or V(auto).
+      nginx_worker_connections:
+        type: int
+        default: 1024
+        description: C(worker_connections) per worker.
+      nginx_error_log_level:
+        type: str
+        default: notice
+        choices: [debug, info, notice, warn, error, crit, alert, emerg]
+        description: Level of the error log, which goes to C(docker logs).
+      nginx_keepalive_timeout:
+        type: raw
+        default: 65s
+        description: C(keepalive_timeout) for client connections.
+      nginx_server_tokens:
+        type: bool
+        default: false
+        description: Show the nginx version in error pages and the C(Server) header.
+      nginx_resolver:
+        type: str
+        default: 127.0.0.11 valid=10s ipv6=off
+        description:
+          - C(resolver) for runtime lookups of the backends. The default is
+            Docker's embedded DNS.
+          - Its C(valid=) decides how fast nginx follows a recreated container
+            to its new IP.
+      nginx_upstream_resolve:
+        type: bool
+        default: true
+        description:
+          - Add C(resolve) to every upstream server, so nginx looks the backend
+            names up at runtime through O(nginx_resolver).
+          - nginx then starts while a backend is still missing (answering
+            C(502) for it) and follows a recreated container to its new IP.
+          - With V(false), nginx resolves the names once at start-up and
+            refuses to start while any backend is unknown.
+          - Needs nginx 1.27.3 or newer, see O(nginx_version).
+      nginx_upstream_keepalive:
+        type: int
+        default: 16
+        description: Idle keepalive connections per upstream, per worker.
+      nginx_ssl_protocols:
+        type: str
+        default: TLSv1.2 TLSv1.3
+        description: C(ssl_protocols) for every HTTPS site (Mozilla "intermediate").
+      nginx_ssl_ciphers:
+        type: str
+        default: >-
+          ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305
+        description: C(ssl_ciphers) for every HTTPS site (Mozilla "intermediate").
+      nginx_http_snippets:
+        type: list
+        elements: str
+        default: []
+        description:
+          - Names from O(nginx_snippets) to include in the C(http {}) block,
+            for example C(limit_req_zone), C(map) or C(log_format).
+
+      # ── Default server ───────────────────────────────────────────────────
+      nginx_default_status:
+        type: int
+        default: 444
+        description:
+          - Status returned for host names that no site claims. V(444) closes
+            the connection without a response.
+          - HTTPS handshakes for unknown names are always rejected, so no
+            certificate leaks to clients that ask for the wrong host.
+      nginx_health_path:
+        type: str
+        default: /healthz
+        description:
+          - Path answered with C(200 ok) on the default server. Used by the
+            container healthcheck and the readiness probe.
+
+      # ── Sites ────────────────────────────────────────────────────────────
+      nginx_sites:
+        type: list
+        elements: dict
+        default: []
+        description:
+          - Virtual hosts, one C(conf.d/<name>.conf) each.
+          - Every key of O(nginx_site_defaults) can be set per site and
+            overrides it there. The defaults shown for those keys are the ones
+            O(nginx_site_defaults) comes with.
+          - A site with a O(nginx_sites[].certificate) listens on 443 (HTTP/2)
+            and its port 80 redirects to HTTPS. Without one it listens on 80
+            only.
+          - Unknown keys are rejected, which catches typos.
+        options:
+          name:
+            type: str
+            required: true
+            description:
+              - Name of the site and of its file in C(conf.d/). Must match
+                C(^[a-z0-9][a-z0-9_.-]*$) and be unique across all sites.
+          server_name:
+            type: raw
+            required: true
+            description: Domain name, or a list of them.
+          backend:
+            type: str
+            description:
+              - Where C(location /) proxies to, as
+                C(scheme://host[:port][/path]), for example
+                V(http://nexus:8081).
+              - The host is usually the backend's container name on
+                O(nginx_docker_network). V(host.docker.internal), any DNS name
+                or IP reachable from the container work too.
+              - Required unless the site has a O(nginx_sites[].template) or a
+                V(/) entry in O(nginx_sites[].locations).
+          certificate:
+            type: str
+            description:
+              - Name of a certificate from O(nginx_certificates). Makes the site
+                HTTPS.
+              - Omit it for a plain HTTP site.
+          template:
+            type: str
+            description:
+              - Absolute path on the controller of a template to render instead
+                of the role's site template, for sites that do not fit the
+                generated shape.
+              - The template sees the site as C(site), with C(site.server_names)
+                always a list, and finds the upstream of a backend URL in
+                C(_nginx_backends[url].upstream).
+          <<: &site_settings
+            https_redirect:
+              type: bool
+              default: true
+              description:
+                - With a certificate, port 80 only redirects to HTTPS.
+                - V(false) serves the site on both ports.
+            http2:
+              type: bool
+              default: true
+              description: Enable HTTP/2 on the HTTPS listener.
+            hsts:
+              type: bool
+              default: false
+              description:
+                - Send C(Strict-Transport-Security). Only turn it on once HTTPS
+                  works for good, because browsers remember it.
+            client_max_body_size:
+              type: raw
+              default: 100m
+              description: C(client_max_body_size). V(0) means unlimited.
+            proxy_buffering:
+              type: bool
+              default: true
+              description:
+                - Buffer responses in nginx (to disk if needed) and free the
+                  backend early.
+                - V(false) streams them straight to the client, for big
+                  downloads.
+            proxy_request_buffering:
+              type: bool
+              default: true
+              description:
+                - Buffer request bodies before passing them on.
+                - V(false) streams uploads straight to the backend.
+            proxy_connect_timeout:
+              type: raw
+              default: 10s
+              description: C(proxy_connect_timeout).
+            proxy_read_timeout:
+              type: raw
+              default: 60s
+              description: C(proxy_read_timeout).
+            proxy_send_timeout:
+              type: raw
+              default: 60s
+              description: C(proxy_send_timeout).
+            proxy_headers:
+              type: dict
+              default: {}
+              description:
+                - Extra C(proxy_set_header) name to value, on top of C(Host),
+                  C(X-Real-IP), C(X-Forwarded-For), C(X-Forwarded-Proto),
+                  C(X-Forwarded-Host) and the websocket headers the role always
+                  sends.
+            snippets:
+              type: list
+              elements: str
+              default: []
+              description: Names from O(nginx_snippets) to include in C(server {}).
+            config:
+              type: str
+              default: ""
+              description: Raw lines for C(server {}).
+            locations:
+              type: list
+              elements: dict
+              default: []
+              description:
+                - More C(location) blocks. An entry with path V(/) replaces the
+                  generated C(location /).
+              options:
+                path:
+                  type: str
+                  required: true
+                  description:
+                    - Anything C(location) accepts, for example V(/v2/),
+                      V(= /x) or V(~ \\.php$).
+                backend:
+                  type: str
+                  description:
+                    - Proxy this location, in the same format as
+                      O(nginx_sites[].backend).
+                    - Without it, the location only holds its snippets and
+                      config.
+                snippets:
+                  type: list
+                  elements: str
+                  description: Names from O(nginx_snippets) to include in C(location {}).
+                proxy_headers:
+                  type: dict
+                  description: Extra C(proxy_set_header), merged over the site's.
+                config:
+                  type: str
+                  description: Raw lines for C(location {}).
+      nginx_site_defaults:
+        type: dict
+        default:
+          https_redirect: true
+          http2: true
+          hsts: false
+          client_max_body_size: 100m
+          proxy_buffering: true
+          proxy_request_buffering: true
+          proxy_connect_timeout: 10s
+          proxy_read_timeout: 60s
+          proxy_send_timeout: 60s
+          proxy_headers: {}
+          snippets: []
+          locations: []
+          config: ""
+        description:
+          - Settings applied to every site, under the site's own keys.
+          - Overriding this variable replaces the whole dict, so copy all keys
+            from C(defaults/main.yml) if you change it.
+        options: *site_settings
+
+      # ── Certificates ─────────────────────────────────────────────────────
+      nginx_certificates:
+        type: list
+        elements: dict
+        default: []
+        description:
+          - Certificates, written to C(certs/<name>.crt) and
+            C(certs/<name>.key). A site uses one by name, and several sites may
+            share one (a wildcard, say).
+          - Three kinds. B(Provided) - both O(nginx_certificates[].cert) and
+            O(nginx_certificates[].key) are given.
+          - B(Self-signed) - O(nginx_certificates[].self_signed=true), generated
+            on the host. It is regenerated only when it is missing or its names
+            no longer match O(nginx_certificates[].domains). Needs C(openssl) on
+            the host.
+          - B(External) - neither. Something else (a certbot deploy hook, ...)
+            puts the files in place; the role only checks that they exist.
+        options:
+          name:
+            type: str
+            required: true
+            description:
+              - Name of the certificate and of its files. Must match
+                C(^[a-z0-9][a-z0-9_.-]*$) and be unique.
+          cert:
+            type: str
+            description:
+              - PEM certificate followed by its intermediates.
+              - The C(ansible.builtin.file) lookup decrypts vault-encrypted
+                files transparently.
+              - Requires O(nginx_certificates[].key).
+          key:
+            type: str
+            no_log: true
+            description:
+              - PEM private key, written with mode C(0600) and C(no_log).
+              - Requires O(nginx_certificates[].cert).
+          self_signed:
+            type: bool
+            default: false
+            description:
+              - Generate a self-signed certificate on the host.
+              - Cannot be combined with O(nginx_certificates[].cert).
+          domains:
+            type: raw
+            description:
+              - Names (and IP addresses) of a self-signed certificate, a string
+                or a list. The first one becomes the CN.
+              - Defaults to the server names of the sites that use the
+                certificate.
+      nginx_selfsigned_days:
+        type: int
+        default: 3650
+        description: Lifetime of newly generated self-signed certificates, in days.
+
+      # ── Snippets ─────────────────────────────────────────────────────────
+      nginx_snippets:
+        type: list
+        elements: dict
+        default: []
+        description:
+          - Your own config pieces, written to C(snippets/<name>.conf).
+          - They are not loaded on their own. Include them by name through
+            O(nginx_http_snippets), O(nginx_sites[].snippets) or
+            O(nginx_sites[].locations[].snippets).
+        options:
+          name:
+            type: str
+            required: true
+            description:
+              - Name of the snippet and of its file. Must match
+                C(^[a-z0-9][a-z0-9_.-]*$) and be unique.
+          content:
+            type: str
+            description:
+              - The snippet itself.
+              - Give exactly one of O(nginx_snippets[].content) and
+                O(nginx_snippets[].src).
+          src:
+            type: str
+            description:
+              - Template to render instead, a path on the controller. A relative
+                path is looked up like any other template.
+              - Give exactly one of O(nginx_snippets[].content) and
+                O(nginx_snippets[].src).
+      nginx_purge_unmanaged:
+        type: bool
+        default: true
+        description:
+          - Delete C(*.conf) files in C(conf.d/) and C(snippets/) that no site
+            or snippet owns, so removing an entry from the variables removes it
+            from nginx.
+          - This removes hand-made files there too. C(certs/) is never purged.
+
+      # ── Readiness ────────────────────────────────────────────────────────
+      nginx_wait_timeout:
+        type: int
+        default: 60
+        description:
+          - After a deploy, how long to poll O(nginx_health_path) until nginx
+            answers, in seconds.
+      nginx_wait_delay:
+        type: int
+        default: 3
+        description: Seconds between two polls.

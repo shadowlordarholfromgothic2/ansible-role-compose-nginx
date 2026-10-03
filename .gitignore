@@ -1,2 +1,5 @@
 # Collections, roles and caches installed by ansible-lint / Molecule
 .ansible/
+
+# Local virtualenv for requirements-dev.txt
+.venv/

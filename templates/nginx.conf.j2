@@ -1,0 +1,58 @@
+# {{ ansible_managed }}
+# Rendered by the compose_nginx role - do not edit on the host.
+#   conf.d/_upstreams.conf  one upstream per backend
+#   conf.d/_default.conf    catch-all for unknown host names + {{ nginx_health_path }}
+#   conf.d/<site>.conf      one per site in nginx_sites*
+#   snippets/<name>.conf    nginx_snippets*, included where they are named
+
+user  nginx;
+worker_processes  {{ nginx_worker_processes }};
+
+# The image links both logs to the container's stdout/stderr: `docker logs`.
+error_log  /var/log/nginx/error.log {{ nginx_error_log_level }};
+pid        /run/nginx.pid;
+
+events {
+    worker_connections  {{ nginx_worker_connections }};
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" "$http_user_agent" '
+                      'host=$host upstream=$upstream_addr rt=$request_time urt=$upstream_response_time';
+    access_log  /var/log/nginx/access.log  main;
+
+    sendfile           on;
+    tcp_nopush         on;
+    keepalive_timeout  {{ nginx_keepalive_timeout }};
+    server_tokens      {{ 'on' if nginx_server_tokens | bool else 'off' }};
+
+    # Docker's embedded DNS: backends are looked up by container name at
+    # runtime, see `resolve` in conf.d/_upstreams.conf.
+    resolver  {{ nginx_resolver }};
+
+    # "upgrade" for websockets, otherwise empty - an empty Connection header is
+    # not sent at all, which lets the upstream keepalive pool reuse connections.
+    map $http_upgrade $proxy_connection {
+        default  upgrade;
+        ''       '';
+    }
+
+    ssl_protocols              {{ nginx_ssl_protocols }};
+    ssl_ciphers                {{ nginx_ssl_ciphers }};
+    ssl_prefer_server_ciphers  off;
+    ssl_session_cache          shared:SSL:10m;
+    ssl_session_timeout        1d;
+    ssl_session_tickets        off;
+{% if nginx_http_snippets | length > 0 %}
+
+{% for name in nginx_http_snippets %}
+    include /etc/nginx/snippets/{{ name }}.conf;
+{% endfor %}
+{% endif %}
+
+    include /etc/nginx/conf.d/*.conf;
+}
