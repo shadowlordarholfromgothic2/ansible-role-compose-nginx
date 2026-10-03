@@ -1,0 +1,19 @@
+---
+# Docker is a prerequisite of the role, not part of it. Installing it here
+# instead of in converge.yml lets the `check` step run the converge playbook
+# in check mode against an instance that already has Docker.
+- name: Prepare
+  hosts: all
+  become: true
+
+  tasks:
+    # The test images ship without apt lists, so nothing can be installed yet.
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 600
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Install Docker
+      ansible.builtin.import_role:
+        name: geerlingguy.docker

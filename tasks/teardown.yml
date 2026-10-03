@@ -1,0 +1,29 @@
+---
+- name: Check whether the compose project still exists
+  ansible.builtin.stat:
+    path: "{{ nginx_compose_dir }}/docker-compose.yml"
+  register: _nginx_teardown_project
+  tags: [deploy]
+
+- name: Stop and remove the nginx container
+  community.docker.docker_compose_v2:
+    project_src: "{{ nginx_compose_dir }}"
+    project_name: "{{ nginx_compose_project }}"
+    state: absent
+    remove_orphans: true
+  when: _nginx_teardown_project.stat.exists
+  tags: [deploy]
+
+- name: Remove the compose project directory
+  ansible.builtin.file:
+    path: "{{ nginx_compose_dir }}"
+    state: absent
+  tags: [deploy]
+
+- name: Report what was kept
+  ansible.builtin.debug:
+    msg: >-
+      nginx removed. Kept {{ nginx_config_dir }} (incl. certificates) and the
+      docker network(s) {{ _nginx_networks | join(', ') }}, which other stacks
+      may still use.
+  tags: [deploy]

@@ -1,23 +1,18 @@
 ---
 # Ansible content needed to lint and test this role. ansible-lint and Molecule
-# install it automatically. List here what the role itself needs to *run*
-# first, then test-only content, and say which is which.
+# install it automatically. To *use* the role you only need community.docker.
 collections:
-  # TODO: collections the role uses, e.g.
-  # - name: community.general
-  #   version: ">=9.0.0"
-
-  # Test-only: Molecule's docker driver creates the instances with it and
-  # connects to them through it. Keep it even if the role never uses Docker.
+  # Used by the role: docker_compose_v2 (deploy and teardown). Molecule's
+  # docker driver needs it for the tests as well.
   - name: community.docker
-    version: ">=3.10.2"
+    version: ">=3.6.0"     # first release with docker_compose_v2
 
   # Test-only: Molecule's docker driver and the profile_tasks callback in
   # molecule/default/molecule.yml.
   - name: ansible.posix
     version: ">=1.4.0"
 
-# Test-only roles used by molecule/default/converge.yml, e.g.
-# roles:
-#   - name: geerlingguy.docker
-#     version: 8.0.0
+roles:
+  # Test-only: installs Docker inside the Molecule instance (prepare.yml).
+  - name: geerlingguy.docker
+    version: 8.0.0

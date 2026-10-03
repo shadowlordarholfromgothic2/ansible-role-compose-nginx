@@ -1,0 +1,119 @@
+---
+# Three kinds of certificate, see nginx_certificates in defaults/main.yml.
+# All end up as certs/<name>.crt + certs/<name>.key.
+
+# ---------- provided: PEM content from the variables --------------------------
+
+- name: Install the provided certificates
+  ansible.builtin.copy:
+    content: "{{ cert.cert | trim }}\n"
+    dest: "{{ _nginx_certs_dir }}/{{ cert.name }}.crt"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _nginx_certificates | selectattr('cert', 'defined') | list }}"
+  loop_control:
+    loop_var: cert
+    label: "{{ cert.name }}"
+  notify: reload nginx
+  tags: [config]
+
+- name: Install the provided private keys
+  ansible.builtin.copy:
+    content: "{{ cert.key | trim }}\n"
+    dest: "{{ _nginx_certs_dir }}/{{ cert.name }}.key"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ _nginx_certificates | selectattr('key', 'defined') | list }}"
+  loop_control:
+    loop_var: cert
+    label: "{{ cert.name }}"
+  no_log: true          # keep the key out of --diff and CI logs
+  notify: reload nginx
+  tags: [config]
+
+# ---------- self-signed: generated on the host --------------------------------
+
+- name: Read the names in the existing self-signed certificates
+  ansible.builtin.command:
+    argv: [openssl, x509, -noout, -ext, subjectAltName, -in, "{{ _nginx_certs_dir }}/{{ cert.name }}.crt"]
+  loop: "{{ _nginx_certificates | selectattr('self_signed') | list }}"
+  loop_control:
+    loop_var: cert
+    label: "{{ cert.name }}"
+  register: _nginx_selfsigned
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [config]
+
+# Only when the certificate is missing or its names differ from `domains`, so
+# clients that were told to trust it keep doing so between runs.
+- name: Generate the self-signed certificates
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -newkey
+      - rsa:2048
+      - -nodes
+      - -days
+      - "{{ nginx_selfsigned_days }}"
+      - -subj
+      - "/CN={{ res.cert.domains[0] }}"
+      - -addext
+      - "subjectAltName={{ _sans | join(',') }}"
+      - -keyout
+      - "{{ _nginx_certs_dir }}/{{ res.cert.name }}.key"
+      - -out
+      - "{{ _nginx_certs_dir }}/{{ res.cert.name }}.crt"
+  loop: "{{ _nginx_selfsigned.results }}"
+  loop_control:
+    loop_var: res
+    label: "{{ res.cert.name }}: {{ res.cert.domains | join(', ') }}"
+  vars:
+    # IP:10.0.0.5 for addresses, DNS:name for everything else
+    _sans: >-
+      {{ res.cert.domains | map('regex_replace', _nginx_ip_re, 'IP:')
+         | map('regex_replace', '^(?!IP:)', 'DNS:') | list }}
+    _current: "{{ res.stdout | default('') | regex_findall(_nginx_san_re) | sort }}"
+  when: (res.rc != 0) or (_current != (res.cert.domains | sort))
+  changed_when: true    # the `when` above already decided a new one is needed
+  notify: reload nginx
+  tags: [config]
+
+- name: Restrict the self-signed private keys
+  ansible.builtin.file:
+    path: "{{ _nginx_certs_dir }}/{{ cert.name }}.key"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ _nginx_certificates | selectattr('self_signed') | list }}"
+  loop_control:
+    loop_var: cert
+    label: "{{ cert.name }}"
+  when: not ansible_check_mode    # the key does not exist yet on a dry first run
+  tags: [config]
+
+# ---------- external: put in place by something else -------------------------
+
+- name: Check the externally managed certificate files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ _nginx_external_cert_files }}"
+  register: _nginx_external_certs
+  tags: [config]
+
+- name: Require the externally managed certificate files
+  ansible.builtin.assert:
+    that: _missing | length == 0
+    fail_msg: >-
+      compose_nginx: these certificate files have neither cert/key nor
+      self_signed in nginx_certificates, so something else must put them in
+      place first: {{ _missing | join(', ') }}
+    quiet: true
+  vars:
+    _missing: "{{ _nginx_external_certs.results | rejectattr('stat.exists') | map(attribute='item') | list }}"
+  tags: [config]

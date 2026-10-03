@@ -1,6 +1,7 @@
 ---
-# Runs the role in a throwaway container and proves it converges, is
-# idempotent and leaves the host in the expected state.
+# Tests the role's mechanism with a trivial backend (traefik/whoami, which
+# echoes the request), never with a real service - the test must prove the
+# ROLE works, not that Nexus boots.
 #
 #   pip install -r requirements-dev.txt
 #   molecule test
@@ -9,8 +10,7 @@ driver:
   name: docker
 
 platforms:
-  # Images with systemd as PID 1, so roles that manage services can be tested.
-  - name: template-role-debian13
+  - name: compose-nginx-debian13
     image: geerlingguy/docker-debian13-ansible:latest
     command: /lib/systemd/systemd
     pre_build_image: true
@@ -18,12 +18,23 @@ platforms:
     cgroupns_mode: host
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Docker inside the instance cannot keep its overlay storage on the
+      # instance's own overlay root fs. Anonymous volumes give it a real
+      # filesystem (same trick as the official docker:dind image).
+      - /var/lib/containerd
+      - /var/lib/docker
+    keep_volumes: false     # remove those volumes on destroy
 
 provisioner:
   name: ansible
   config_options:
     defaults:
       callbacks_enabled: ansible.posix.profile_tasks
+  inventory:
+    group_vars:
+      all:
+        docker_install_compose_plugin: true
+        docker_install_compose: false
 
 verifier:
   name: ansible
@@ -32,7 +43,10 @@ scenario:
   test_sequence:
     - destroy
     - create
+    - prepare         # installs Docker
+    - check           # --check on a fresh host: no config, network or stack yet
     - converge
     - idempotence     # the important one
+    - check           # --check with nginx running: compose dry run
     - verify
     - destroy

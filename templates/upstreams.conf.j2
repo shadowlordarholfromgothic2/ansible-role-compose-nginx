@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# One upstream per backend host:port across all sites - rendered by the
+# compose_nginx role. Sites reach them as proxy_pass <scheme>://<upstream>.
+{% if nginx_upstream_resolve | bool %}
+#
+# `resolve` looks the name up at runtime through the resolver in nginx.conf:
+# nginx starts while a backend is still missing (answering 502 for it) and
+# follows a recreated container to its new IP.
+{% endif %}
+{% for upstream in _nginx_upstreams %}
+
+upstream {{ upstream.upstream }} {
+    zone {{ upstream.upstream }} 64k;
+    server {{ ('[' ~ upstream.host ~ ']') if ':' in upstream.host else upstream.host }}:{{ upstream.port }}{{ ' resolve' if nginx_upstream_resolve | bool else '' }};
+    keepalive {{ nginx_upstream_keepalive }};
+}
+{% endfor %}

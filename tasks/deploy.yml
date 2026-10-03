@@ -1,0 +1,40 @@
+---
+- name: Check whether there is a compose file to diff against
+  ansible.builtin.stat:
+    path: "{{ nginx_compose_dir }}/docker-compose.yml"
+  register: _nginx_compose_file
+  when: ansible_check_mode
+  tags: [deploy]
+
+- name: Deploy the nginx stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ nginx_compose_dir }}"
+    # Pinned explicitly: compose would otherwise derive it from the directory
+    # name, and renaming the directory later would orphan the running container.
+    project_name: "{{ nginx_compose_project }}"
+    state: "{{ nginx_state }}"
+    pull: "{{ nginx_pull }}"
+    remove_orphans: true
+    wait: false
+  register: nginx_compose_result
+  # A dry run on a fresh host has not written the compose file.
+  when: (not ansible_check_mode) or _nginx_compose_file.stat.exists
+  tags: [deploy]
+
+- name: Apply pending reloads before the readiness check
+  ansible.builtin.meta: flush_handlers
+  tags: [deploy]
+
+- name: Wait for nginx to answer
+  ansible.builtin.uri:
+    url: "http://{{ _nginx_probe_host }}:{{ nginx_http_port }}{{ nginx_health_path }}"
+    status_code: 200
+    timeout: 5
+  register: _nginx_probe
+  until: _nginx_probe is succeeded
+  retries: "{{ nginx_wait_timeout | int // nginx_wait_delay | int }}"
+  delay: "{{ nginx_wait_delay }}"
+  when:
+    - nginx_state == 'present'
+    - not ansible_check_mode
+  tags: [deploy, verify]
