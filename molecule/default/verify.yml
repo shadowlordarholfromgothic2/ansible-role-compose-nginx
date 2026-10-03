@@ -1,0 +1,22 @@
+---
+# Check the host's end state, not the role's output: what would a user log in
+# and look at to tell that the role worked?
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Read the rendered configuration file
+      ansible.builtin.slurp:
+        src: /etc/template_role/config.ini
+      register: config
+
+    - name: Assert the settings were rendered
+      ansible.builtin.assert:
+        that:
+          - "'log_level = info' in content"
+          - "'listen = 127.0.0.1:8080' in content"
+        quiet: true
+      vars:
+        content: "{{ config.content | b64decode }}"

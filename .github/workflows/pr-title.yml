@@ -1,0 +1,22 @@
+---
+# PRs are squash-merged with the PR title as the commit message, and
+# release-please builds CHANGELOG.md from those commits. So the title has to
+# be a Conventional Commit: "feat: …", "fix(handlers): …", "feat!: …".
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-commit:
+    name: Conventional Commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

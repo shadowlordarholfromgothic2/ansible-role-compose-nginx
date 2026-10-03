@@ -1,0 +1,22 @@
+---
+galaxy_info:
+  # Must match the prefix of every variable in defaults/main.yml
+  # (ansible-lint: var-naming[no-role-prefix]).
+  role_name: template_role
+  namespace: local
+  author: Kirill
+  description: >-
+    TODO: one or two sentences on what the role does and what it deliberately
+    leaves to other roles.
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions: [bookworm, trixie]
+    - name: Ubuntu
+      versions: [jammy, noble]
+  galaxy_tags: []
+
+# Prefer checking for a prerequisite in tasks/main.yml over pulling in a role
+# that installs it.
+dependencies: []

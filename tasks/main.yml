@@ -1,0 +1,55 @@
+---
+# ==============================================================================
+# 1. FAIL FAST - validate input before touching anything
+# ==============================================================================
+
+- name: Validate role input
+  ansible.builtin.assert:
+    that:
+      - template_role_state in ['present', 'absent']
+      - template_role_config_dir is match('^/')
+      - template_role_settings is mapping
+    fail_msg: >-
+      template_role: needs template_role_state present/absent, an absolute
+      template_role_config_dir and a dict in template_role_settings
+      (got state='{{ template_role_state }}',
+      config_dir='{{ template_role_config_dir }}')
+    quiet: true
+  tags: [always]
+
+# ==============================================================================
+# 2. TEARDOWN - a separate path, so the rest of the file only handles 'present'
+# ==============================================================================
+
+- name: Remove the configuration
+  ansible.builtin.file:
+    path: "{{ template_role_config_dir }}"
+    state: absent
+  when: template_role_state == 'absent'
+  tags: [config]
+
+# ==============================================================================
+# 3. CONFIGURE
+# ==============================================================================
+
+- name: Configure template_role
+  when: template_role_state == 'present'
+  tags: [config]
+  block:
+    - name: Create the configuration directory
+      ansible.builtin.file:
+        path: "{{ template_role_config_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render the configuration file
+      ansible.builtin.template:
+        src: config.ini.j2
+        dest: "{{ template_role_config_dir }}/config.ini"
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      notify: template_role config changed

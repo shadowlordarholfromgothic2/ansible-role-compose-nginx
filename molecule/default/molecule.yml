@@ -1,0 +1,38 @@
+---
+# Runs the role in a throwaway container and proves it converges, is
+# idempotent and leaves the host in the expected state.
+#
+#   pip install -r requirements-dev.txt
+#   molecule test
+
+driver:
+  name: docker
+
+platforms:
+  # Images with systemd as PID 1, so roles that manage services can be tested.
+  - name: template-role-debian13
+    image: geerlingguy/docker-debian13-ansible:latest
+    command: /lib/systemd/systemd
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      callbacks_enabled: ansible.posix.profile_tasks
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - destroy
+    - create
+    - converge
+    - idempotence     # the important one
+    - verify
+    - destroy

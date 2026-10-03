@@ -1,0 +1,31 @@
+---
+# On every merge to main, release-please opens (or updates) a release PR that
+# bumps the version and adds the merged changes to CHANGELOG.md. Merging that
+# PR tags the release and publishes a GitHub release.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          # PRs opened with the default GITHUB_TOKEN do not trigger workflows,
+          # so the release PR gets no CI checks. Add a fine-grained PAT as the
+          # RELEASE_PLEASE_TOKEN secret if branch protection requires them.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}

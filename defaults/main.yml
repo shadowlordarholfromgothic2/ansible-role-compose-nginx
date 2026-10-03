@@ -1,0 +1,29 @@
+---
+# ==============================================================================
+# template_role - role interface
+# ==============================================================================
+# Everything a user of the role may override lives here, with a comment.
+# Internal constants that must not be overridden go to vars/main.yml.
+#
+# Every variable starts with the role name (ansible-lint enforces this).
+# ==============================================================================
+
+# ---------- state -------------------------------------------------------------
+
+# present -> the role's config is installed
+# absent  -> the role's config is removed
+template_role_state: present
+
+# ---------- paths -------------------------------------------------------------
+
+# Where the role writes its configuration on the managed host.
+template_role_config_dir: /etc/template_role
+
+# ---------- configuration -----------------------------------------------------
+
+# Key/value pairs rendered into {{ template_role_config_dir }}/config.ini.
+#
+# template_role_settings:
+#   log_level: info
+#   listen: "127.0.0.1:8080"
+template_role_settings: {}

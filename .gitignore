@@ -1,0 +1,2 @@
+# Collections, roles and caches installed by ansible-lint / Molecule
+.ansible/

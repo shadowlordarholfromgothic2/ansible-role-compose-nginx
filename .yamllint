@@ -1,0 +1,21 @@
+---
+# Kept compatible with ansible-lint, which reads this file as well:
+# https://docs.ansible.com/projects/lint/rules/yaml/
+extends: default
+
+ignore-from-file: .gitignore
+
+rules:
+  braces:
+    max-spaces-inside: 1
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: false
+  line-length:
+    max: 160
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+  truthy:
+    # GitHub workflows have a top-level `on:` key.
+    check-keys: false

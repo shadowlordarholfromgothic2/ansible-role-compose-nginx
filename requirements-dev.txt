@@ -1,0 +1,8 @@
+# Python tooling to lint and test the role. CI installs exactly this file:
+#   pip install -r requirements-dev.txt
+# Ansible content (collections, test roles) is in requirements.yml.
+ansible-core==2.21.4
+ansible-lint==26.9.0
+molecule==26.9.0
+molecule-plugins[docker]==26.9.28
+yamllint==1.38.0

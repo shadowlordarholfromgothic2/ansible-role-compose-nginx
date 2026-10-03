@@ -1,0 +1,13 @@
+---
+# Handlers are notified by their `listen` topic, not by their name, so the name
+# can change without breaking the tasks that notify it.
+#
+# TODO: replace the placeholder with the real action, e.g.
+#   ansible.builtin.systemd_service:
+#     name: myservice
+#     state: restarted
+
+- name: Apply template_role configuration
+  ansible.builtin.debug:
+    msg: "template_role: configuration changed - TODO: reload the service"
+  listen: template_role config changed

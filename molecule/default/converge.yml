@@ -1,0 +1,16 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+
+  vars:
+    template_role_settings:
+      log_level: info
+      listen: "127.0.0.1:8080"
+
+  tasks:
+    # Fully qualified (namespace from meta/main.yml): Molecule and ansible-lint
+    # link the repo under this name, whatever the checkout directory is called.
+    - name: Run the role under test
+      ansible.builtin.import_role:
+        name: local.template_role

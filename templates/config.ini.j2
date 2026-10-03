@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# Rendered by the template_role role - do not edit on the host.
+{% for key, value in template_role_settings | dictsort %}
+{{ key }} = {{ value }}
+{% endfor %}

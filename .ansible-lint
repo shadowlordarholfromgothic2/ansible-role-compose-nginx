@@ -1,0 +1,7 @@
+---
+# https://docs.ansible.com/projects/lint/configuring/
+profile: production
+
+exclude_paths:
+  - .ansible/
+  - .github/
